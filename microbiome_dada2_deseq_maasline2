@@ -1,0 +1,1695 @@
+---
+title: "DADA2-16S"
+author: "wangy"
+date: "5/21/2021"
+output: html_document
+---
+
+```{r,}
+
+path <- "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq"
+```
+# Initiate environment
+```{r environment-initiation}
+library(dada2); packageVersion("dada2")
+library(tidyverse); packageVersion("tidyverse")
+library(ggpubr); packageVersion("ggpubr")
+library(msa); packageVersion("msa")
+library(phangorn); packageVersion("phangorn")
+library(phyloseq); packageVersion("phyloseq")
+```
+#Get all the packages installed that we need for the analysis
+```{r initiate-environment}
+.cran_packages <- c("tidyverse", "cowplot", "picante", "vegan", "HMP", "dendextend", "rms", "devtools", "remotes")
+.bioc_packages <- c("phyloseq", "DESeq2", "metagenomeSeq", "ALDEx2", "dada2","vegan","msa","phangorn","apeglm")
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+  install.packages(.cran_packages[!.inst])
+}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+install.packages("BiocManager")
+BiocManager::install(.bioc_packages)
+
+
+
+devtools::install_github("adw96/breakaway")
+devtools::install_github("adw96/DivNet")
+devtools::install_github(repo = "malucalle/selbal")
+devtools::install_github("microsud/microbiomeutilities")
+devtools::install_github("microbiome/microbiome")
+
+#require(devtools)
+#install_version("Matrix", version = "1.3.2",repos = "http://cran.us.r-project.org")
+```
+#library
+```{r, file location}
+library(dada2)
+library(phyloseq)
+library(ShortRead)
+library(ggplot2)
+library("msa")
+library("phangorn")
+library("microbiomeutilities")
+library(microbiome)
+library(knitr)
+library(tidyverse)
+library(DESeq2)
+library(magrittr)
+library(DivNet)
+library(breakaway)
+library(ggpubr)
+library(data.table)
+library(dendextend)
+library(vegan)
+library("ggsci")
+library("ggplot2")
+library("gridExtra")
+```
+#load image
+```{r, load}
+load("C:/Users/yu.w/Box/YuWang/Progress/16soral/Rworkspace/16sworkspace20211015.RData")
+```
+#Getting matched lists of the forward and reverse fastq files and extracting sample names
+```{r, file location}
+pathf <- "C:/Users/yu.w/Box/8. BE_Oral microbiome/3.16S data/raw_new/R1"
+pathr <- "C:/Users/yu.w/Box/8. BE_Oral microbiome/3.16S data/raw_new/R2"
+length(list.files(pathf));length(list.files(pathr))
+
+fnFs <- sort(list.files(pathf, pattern=".fastq", full.names = TRUE))
+fnRs <- sort(list.files(pathr, pattern=".fastq", full.names = TRUE))
+
+sample.names <- sapply(strsplit(basename(fnFs), "[_]"), `[`, 1)                 #extracting string prior to the first underscore
+#sanity check that the files are in order and the names are as expected
+head(fnFs)                   
+head(fnRs)
+sample.names
+#sanity check that we have copied over all the files
+if(length(fnFs) != length(fnRs)) stop("Forward and reverse files do not match.")
+#Inspect read quality profiles
+plotQualityProfile(fnFs[1:6])
+plotQualityProfile(fnRs[1:6])
+
+```
+#filter and trim
+```{r, filter and trim}
+#Filter and trim forward and reverse reads
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))    
+#Place filtered files in new filtered subdirectory
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+#add names
+names(filtFs) <- sample.names               
+names(filtRs) <- sample.names
+#sanity check
+head(filtFs) 
+head(filtRs)
+# ATTENTION CHANGE VALUES FOR lenf lenr ACCORDING TO PLOT RESULTS
+lenf<-250
+lenr<-240
+#in the interactive mode the multithread is limited I had to play around to find a limit of 3 threads.
+#out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(lenf,lenr),
+ #                    maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+  #                   compress=TRUE, multithread=3) 
+
+out <- filterAndTrim(fwd = fnFs, filt = filtFs, rev = fnRs, filt.rev = filtRs,
+                     trimLeft = c(10,10),
+                     truncLen = c(250,240),
+                     maxEE = 2,
+                     maxN = 0,
+                     rm.phix = TRUE,
+                     compress = TRUE,
+                     verbose = TRUE,
+                     multithread = TRUE
+                     )
+head(out)
+
+# Create output tibble
+out.tb <- out %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "sample_name") %>%
+  as_tibble()
+
+out.tb <- out.tb %>%    
+  filter(reads.out < 1e+06) 
+
+# Check if any sample had fewer than 100 sequences.
+# If they do have fewer than 100 sequences and you are not expecting it (i.e. Antibiotics treatment),
+# take a note of it and go back and move the fastq files to a different directory and rerun
+# Leaving 'dud' samples in the mix messes with several of the downstream steps
+out.tb_low100<- out.tb %>%
+  filter(reads.out < 100)
+
+out.tb_up100 <- out.tb%>%
+  filter(reads.out > 100)
+
+out.tb %>%
+  filter(reads.out > 1e+06)
+
+# Some diagnostic plots
+qc.filt.lm <- ggplot(out.tb, aes(x = reads.in, y = reads.out)) +
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(method = "lm") + # quick linear model
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Raw Reads", y = "Trimmed Reads", title = "Read Trimming Results")
+qc.stats <- out.tb %>%
+  mutate(Loss = reads.in-reads.out) %>%
+  mutate(Percent_Remaining = round((100*(reads.out/reads.in)), digits = 2))
+qc.filt.box <- ggplot(qc.stats, aes(x = reorder(sample_name, -Percent_Remaining), y = Percent_Remaining)) +
+  geom_point() +
+  theme(axis.text.x = element_blank()) +
+  labs(x = "", title = "% Reads Remaining per Sample", y = "% of Reads Reamining Post-QC")
+ggarrange(qc.filt.lm, qc.filt.box, ncol = 2)
+```
+#Calculate error correction
+```{r, error correction}
+
+# to avoid error caused by samples with too low reads
+exists <- file.exists(filtFs) & file.exists(filtRs)
+filtFs <- filtFs[exists]
+filtRs <- filtRs[exists]
+
+#Learn error rates 
+errF <- learnErrors(filtFs, multithread=10)
+errR <- learnErrors(filtRs, multithread=10)
+plotErrors(errF, nominalQ=TRUE)
+errF$err_out
+######Eliminate repetitive sequence
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+#Sample inference
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+dadaFs[[1]]
+#Merge F and R reads
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+```
+#construct ASV and check length
+```{r, check length}
+#Construct sequence table
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+#Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+#check if you lost anything during filtering or error correction
+#Tracking reads through the pipeline
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged")
+rownames(track) <- sample.names
+head(track)
+```
+#Remove Chimeras
+```{r, chimeras}
+#Filter chimeric reads
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+seqtab.nochim.100 <- subset(seqtab.nochim, !(rownames(seqtab.nochim) %in% out.tb_low100$fastQId))
+
+dim(seqtab.nochim.100) 
+sum(seqtab.nochim)/sum(seqtab)    #ensuring retained majority of reads
+
+```
+#annotation 
+```{r, read chimera file}
+#if there are mang NA in Eukaryota, use assignTaxonomy(..,tryRC=TRUE) to align revorse strand
+tax <- assignTaxonomy(seqtab.nochim, paste0(path,"/rdp_train_set_18.fa.gz",sep = "" ),multithread=TRUE)
+tax.plus<- addSpecies(tax, paste0(path,"/rdp_species_assignment_18.fa.gz", sep=""))
+colnames(tax.plus) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+
+```
+#save file
+```{r,save}
+setwd(path)
+seqtable.taxa.plus <- cbind('#seq'=rownames(tax), t(seqtab.nochim), tax.plus)
+# ASV export 
+write.table(seqtab.nochim, "dada2_counts.txt", sep="\t", quote=F, row.names = T)
+# annotation ASV export
+write.table(seqtable.taxa.plus , "dada2_counts.taxon.species.txt", sep="\t", quote=F, row.names = F)
+# track saved
+write.table(track , "dada2_track.txt", sep="\t", quote=F, row.names = F)
+
+```
+#Only use it if you need phylogeny for your distance metrics. 
+```{r, tree}
+seqs <- getSequences(seqtab.nochim)
+
+names(seqs) <- seqs # This propagates to the tip labels of the tree
+mult <- msa(seqs, method="ClustalW", type="dna", order="input")
+
+phang.align <- as.phyDat(mult, type="DNA", names=getSequence(seqtab))
+
+dm <- dist.ml(phang.align)# distance count
+treeNJ <- NJ(dm) # Note, tip order != sequence order neighbour tree
+fit = pml(treeNJ, data=phang.align)# maximum likelihood method
+
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+                       rearrangement = "stochastic", control = pml.control(trace = 0))
+detach("package:phangorn", unload=TRUE)
+```
+#combine the tree with the taxonomy and feature table into a phyloseq object
+```{r, create phyloseq object}
+ps.rdp <- phyloseq(otu_table(t(seqtab.nochim), taxa_are_rows=TRUE), tax_table(tax.plus), phy_tree(fitGTR$tree))
+#this changes the ASV labels from the sequence to ASV with numbers and stores the sequence in the refseq slot of the phyloseq object
+ps.rdp<-add_refseq(ps.rdp,tag = "ASV")
+```
+#Read in the DADA2 generated file together with a metadata file with information on the samples that were sequenced.
+```{r, read in file}
+
+map <- import_qiime_sample_data(paste0("C:/Users/yu.w/Box/8. BE_Oral microbiome/3.16S data","/metadata.txt",sep=""))
+metadata <- read.csv("C:/Users/yu.w/Box/8. BE_Oral microbiome/3.16S data/metadata.csv")
+ps <- merge_phyloseq(ps.rdp, map)
+
+#keep taxa >0
+ps<-prune_taxa(taxa_sums(ps) > 0, ps) 
+
+```
+# Outlier sample removal
+```{r sample-removal}
+# Remove samples with fewer than reads=100
+ps.100 <- prune_samples(sample_sums(ps) >= 100, ps)
+min(sample_sums(ps.100))
+```
+# Taxon cleaning 
+```{r taxon-cleaning}
+# Begin by removing sequences that were not classified as Bacteria or were classified as either mitochondria or chlorplast
+ps.100 # Check the number of taxa prior to removal
+ps.100.1 <- ps.100 %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+      Family  != "mitochondria" &
+      Class   != "Chloroplast" &
+      Phylum != "Cyanobacteria/Chloroplast"&
+      Phylum != "NA"
+  )
+ps.100.1 # Confirm that the taxa were removed
+
+# choose BE/EAC case and control
+ps.100.be.eac <- subset_samples(ps.100.1, status %in% c("BE", "BE_Control", "EAC", "EAC_Control"))
+```
+# Define prevalence of each taxa
+```{r prevalence-cleaning}
+prev = apply(X = otu_table(ps.100.be.eac),
+                MARGIN = ifelse(taxa_are_rows(ps.100.be.eac), yes = 1, no = 2),
+                FUN = function(x){sum(x > 0)})
+
+#prevalence threshold as 10% of total samples
+prevalenceThreshold.10 = 0.1 * nsamples(ps.100.be.eac)
+
+## [1] 24.6
+# Execute prevalence filter, using `prune_taxa()` function
+ps.prev = prune_taxa((prev > prevalenceThreshold.10), ps.100.be.eac)
+
+```
+### add OTU annotation
+```{r}
+  vegan_tax <-  function(physeq){
+    tax <-  tax_table(physeq)
+
+    return(as(tax,"matrix"))
+  }
+  
+tax.prev <- data.frame(vegan_tax(ps.prev))
+```
+# Filter entries with unidentified Phylum.
+```{r}
+#filter phylum less than 5 
+prevdf = data.frame(Prevalence = prev,
+                      TotalRelativeAbundance = taxa_sums(ps.100.be.eac),
+                      tax_table(ps.100.be.eac))
+
+keepPhyla = table(prevdf$Phylum)[(table(prevdf$Phylum) > 5)]
+prevdf1 = subset(prevdf, Phylum %in% names(keepPhyla))
+## phyloseq-class experiment-level object
+ggplot(prevdf1, aes(TotalRelativeAbundance, Prevalence, color = Phylum)) +
+  geom_hline(yintercept = prevalenceThreshold.10, alpha = 0.5, linetype = 2) +
+  geom_point(size = 2, alpha = 0.7) +
+  scale_y_log10() + scale_x_log10() +
+  xlab("Total Abundance") +
+  facet_wrap(~Phylum)
+```
+#plot the counts for each sample to identify problematic samples.
+```{r number of reads}
+
+sample_count<- data.frame(sample_sums(ps.100.be.eac))
+colnames(sample_count) <- c("reads")
+
+#Scatter plot for each samples
+pg<- ggplot(sample_count, aes(x=rownames(sample_count), y=sample_count$reads)) +geom_point()+theme(axis.text.x = element_blank())+
+  labs(x= "Sample", y="ASV")+
+  scale_y_continuous(breaks = seq(0, 90000,30000))
+
+stat_median <-  data.frame(quantile(sample_count$reads))
+
+sample_count$sample<- c("sample")
+
+#boxplot for all samples
+pg2<-ggplot(sample_count, aes(x=sample_count$sample,y=sample_count$reads))+
+  geom_boxplot()+
+  geom_jitter(aes(x=sample_count$sample, y=sample_count$reads))+
+  stat_boxplot(geom='errorbar', width=0.2)+
+  theme(axis.title.x = element_blank(),panel.grid= element_blank(), panel.background =element_blank(),axis.line = element_line(size=0.5))+
+  labs(x= "Sample", y="ASV")+
+  scale_y_continuous(breaks = seq(0, 90000, 30000))
+
+#statistics
+library(skimr)
+skim <- skim(sample_count)
+
+#define x variable to plot library size, could be run, treatment or other criteria
+xvar<-"status"
+pg3 <- ggplot(sample_data(ps.be.10), aes_string(xvar, fill=xvar,y = log10(reads_sample))) +
+    geom_violin()  + geom_jitter(alpha=0.5, width = 0.15) +
+     theme_bw()+theme(legend.position = "none",panel.grid.major = element_blank(),)+ylab("log10(library size)")
+ 
+#histogram plot
+tdt = data.table(tax_table(ps),TotalCounts = taxa_sums(ps),OTU = taxa_names(ps))
+pg4 <- ggplot(tdt, aes(TotalCounts)) + 
+  geom_histogram() + 
+  ggtitle("Histogram of Total Counts")+ ylab("ASV count")
+
+```
+#Create a graph with relative abundance of the phyla 
+```{r, create phylum overview}
+# count phylum 
+ps.phylum <- ps.100.be.eac %>%
+          tax_glom(taxrank = "Phylum")%>%  
+          microbiome::transform(transform = "compositional")%>% 
+          psmelt() #melting phyloseq
+
+# count genus 
+ps.genus <- ps.be.10.integer %>%
+          tax_glom(taxrank = "Genus")%>%  
+          microbiome::transform(transform = "compositional")%>%
+          psmelt()
+
+#count species
+ps.species <- ps.100.be.eac %>%
+          tax_glom(taxrank = "Species")%>%  
+          microbiome::transform(transform = "identity")%>%
+          psmelt()
+#ps.species.2 <- ps.species[,c(1:5,77)]
+
+#group together what is below 1%
+ps.phylum$Phylum<-as.factor(ps.phylum$Phylum)
+levels(ps.phylum$Phylum) <- c(levels(ps.phylum$Phylum), "Other")
+ps.phylum<-within(ps.phylum,Phylum[Abundance < 0.01] <- "Other")
+old.lvl<-levels(ps.phylum$Phylum)
+ps.phylum$Phylum<-factor(ps.phylum$Phylum, levels=c(sort(old.lvl[old.lvl!="Other"], decreasing = TRUE), "Other"))
+phylumlist<-unique(ps.phylum[,"Phylum"])
+
+#fct_reorder organizes the plot with the most abundant of 'Firmicutes' at the bottom
+customOrder <- ps.phylum %>%
+  filter(Phylum == "Firmicutes") %>%
+  arrange(-Abundance) %>%
+  mutate(plotOrder = row_number()) %>%
+  select(c("Sample", "plotOrder"))
+ps.phylum <- left_join(ps.phylum,customOrder, by="Sample" )
+
+#phylum level box-plot
+dna1 <- ggplot(ps.phylum, aes( x = reorder(Sample,plotOrder), y = Abundance, fill=fct_reorder(Phylum,Abundance),width=.9)) + 
+  geom_bar(stat = "identity") +
+  facet_grid(~status, scales = "free_x",space="free_x") +theme_bw()+
+  theme(axis.title.x = element_blank(),legend.title = element_blank(), axis.text.x = element_blank(), panel.grid = element_blank(), axis.ticks.x = element_blank() )+
+  scale_fill_manual(values=c("#e6ab02", "#666666", "#a6761d" , "#66a61e", "#e7298a","#7570b3","#d95f02","#1b9e77"))+
+  ylab("Relative Abundace")
+dna1
+
+#dna-type box-plot
+dna2 <- ggplot(ps.phylum, aes( x = reorder(Sample,plotOrder), y = Abundance, fill=fct_reorder(Phylum,Abundance),width=.9)) + 
+  geom_bar(stat = "identity") +
+  facet_grid(~be_dnatype, scales = "free_x",space="free_x") +theme_bw()+
+  theme(axis.title.x = element_blank(),legend.title = element_blank(), axis.text.x = element_blank(), panel.grid = element_blank(), axis.ticks.x = element_blank() )+
+  scale_fill_manual(values=c("#e6ab02", "#666666", "#a6761d" , "#66a61e", "#e7298a","#7570b3","#d95f02","#1b9e77"))+
+  ylab("Relative Abundace")
+dna2
+
+#merge box_plot in phylum level 
+dna3 <- ggplot(ps.phylum, aes( x = status, y = Abundance, fill=fct_reorder(Phylum,Abundance),width=.9)) + 
+  geom_bar(stat = "identity",position="fill") +
+  theme(axis.title.x = element_blank(),legend.title = element_blank(),  panel.grid = element_blank(), axis.ticks.x = element_blank() )+
+  scale_fill_manual(values=c("#e6ab02", "#666666", "#a6761d" , "#66a61e", "#e7298a","#7570b3","#d95f02","#1b9e77"))+
+  ylab("Relative Abundace")
+dna3
+
+#merge box_plot in DNA extraction
+dna4 <- ggplot(ps.phylum, aes( x = be_dnatype, y = Abundance, fill=fct_reorder(Phylum,Abundance),width=.9)) + 
+  geom_bar(stat = "identity",position="fill") +
+  theme(axis.title.x = element_blank(),legend.title = element_blank(),  panel.grid = element_blank(), axis.ticks.x = element_blank() )+
+  scale_fill_manual(values=c("#e6ab02", "#666666", "#a6761d" , "#66a61e", "#e7298a","#7570b3","#d95f02","#1b9e77"))+
+  ylab("Relative Abundace")
+dna4
+```
+# beta diversity measures.
+```{r, beta diversity}
+
+# relative abundance
+ps.prev.rel=transform_sample_counts(ps.prev, function(x) x / sum(x) )
+ps.be.10 <- subset_samples(ps.prev.rel, status %in% c("BE", "BE_Control"))
+ps.eac.10 <- subset_samples(ps.prev.rel, status %in% c("EAC", "EAC_Control"))
+
+#dis by GERD
+ps.be.10.rel.gerd <- subset_samples(ps.be.10, gerdall %in% c("1"))
+ps.be.10.rel.ungerd <- subset_samples(ps.be.10, gerdall %in% c("0"))
+
+ps.eac.10.rel.gerd <- subset_samples(ps.eac.10, gerdall %in% c("1"))
+ps.eac.10.rel.ungerd <- subset_samples(ps.eac.10, gerdall %in% c("0"))
+
+# UniFrac
+#ord.ps.uni.be.10 <- ordinate(ps.be.10, method = "PCoA", distance = "unifrac")
+#ord.ps.uni.eac.10 <- ordinate(ps.eac.10, method = "PCoA", distance = "unifrac")
+
+# weighted UniFrac
+#ord.ps.wuni.be.10 <- ordinate(ps.be.10, method = "PCoA", distance = "wunifrac")
+#ord.ps.wuni.eac.10 <- ordinate(ps.eac.10, method = "PCoA", distance = "wunifrac")
+
+# bray-curits
+ord.ps.bc.be.10.gerd <- ordinate(ps.be.10.rel.gerd, method = "PCoA", distance = "bray")
+ord.ps.bc.be.10.ungerd <- ordinate(ps.be.10.rel.ungerd, method = "PCoA", distance = "bray")
+
+ord.ps.bc.eac.10.ugerd <- ordinate(ps.eac.10.rel.gerd, method = "PCoA", distance = "bray")
+ord.ps.bc.eac.10.ungerd <- ordinate(ps.eac.10.rel.ungerd, method = "PCoA", distance = "bray")
+
+####plot ------
+p.ordu.be.10 <- plot_ordination(ps.be.10, ord.ps.bc.be.10, color = "status") +
+  ggtitle("PCoA:Bray-Curtis Distances")+ geom_point(size=3)+theme(legend.position="none")+
+  stat_ellipse(type = "norm") +
+ theme_classic()+
+  scale_color_d3()
+p.ordu.be.10
+
+#plot axes 1 and 2 of BC-dis between EAC
+p.ordu.eac.10 <- plot_ordination(ps.eac.10, ord.ps.bc.eac.10, color = "status") +
+  ggtitle("PCoA:Bray-Curtis Distances")+ geom_point(size=3)+theme(legend.position="none")+
+  stat_ellipse(type = "norm") +
+ theme_classic()+
+  scale_color_d3()
+p.ordu.eac.10
+
+#dis GERD
+p.ordu.be.10.gerd <- plot_ordination(ps.be.10.rel.gerd, ord.ps.bc.be.10.gerd, color = "status") +
+  ggtitle("Bray-Curtis Distances")+ geom_point(size=3)+theme(legend.position="none")+
+  stat_ellipse(type = "norm") +
+ theme_classic()+
+  scale_color_d3()
+p.ordu.be.10.gerd
+
+p.ordu.be.10.ungerd <- plot_ordination(ps.be.10.rel.ungerd, ord.ps.bc.be.10.ungerd, color = "status") +
+  ggtitle("Bray-Curtis Distances")+ geom_point(size=3)+theme(legend.position="none")+
+  stat_ellipse(type = "norm") +
+ theme_classic()+
+  scale_color_d3()
+p.ordu.be.10.ungerd
+
+#plot by axes 1 and 2 of unifrac distance between BE.
+#p.ordu.uni.be.10 <- plot_ordination(ps.be.10, ord.ps.uni.be.10, color = "status") +
+ # ggtitle("PCoA:UniFrac") +
+ # geom_point(size=3)+theme(legend.position="none")+
+ # stat_ellipse(type = "norm") +
+ #theme_classic()+
+#  scale_color_d3()
+#p.ordu.uni.be.10
+
+#plot by axes 1 and 2 of unifrac distance between EAC.
+#p.ordu.uni.eac.10 <- plot_ordination(ps.eac.10, ord.ps.uni.eac.10, color = "status") +
+#  ggtitle("PCoA:UniFrac") +
+#  geom_point(size=3)+theme(legend.position="none")+
+#  stat_ellipse(type = "norm") +
+ #theme_classic()+
+ # scale_color_d3()
+#p.ordu.uni.eac.10
+
+#divided by axes 1 and 2 wuni
+#p.ordu.wuni.be.10 <- plot_ordination(ps.be.10, ord.ps.wuni.be.10, color = "status") +
+ # ggtitle("PCoA:Weighted UniFrac") +
+ # geom_point(size=3)+theme(legend.position="none")+
+ # stat_ellipse(type = "norm") +
+ #theme_classic()+
+ # scale_color_d3()
+#p.ordu.wuni.be.10
+
+#p.ordu.wuni.eac.10 <- plot_ordination(ps.eac.10, ord.ps.wuni.eac.10, color = "status") +
+#  ggtitle("PCoA:Weighted UniFrac") +
+#  geom_point(size=3)+theme(legend.position="none")+
+#  stat_ellipse(type = "norm") +
+# theme_classic()+
+#  scale_color_d3()
+#p.ordu.wuni.eac.10
+
+# Function to run adonis test on a physeq object and a variable from metadata 
+# adonis test for unifrac
+#doadonis.U <- function(physeq, category) {
+#  bdist <- phyloseq::distance(physeq, "unifrac")
+#  col <- as(sample_data(physeq), "data.frame")[ ,category]
+  # Adonis test
+#  adonis.bdist <- adonis(bdist ~ col)
+#  print(adonis.bdist)
+#}
+
+ #adonis test for wunifrac
+#doadonis.wU <- function(physeq, category) {
+#  bdist <- phyloseq::distance(physeq, "wunifrac")
+ # col <- as(sample_data(physeq), "data.frame")[ ,category]
+#  # Adonis test
+#  adonis.bdist <- adonis(bdist ~ col)
+#  print(adonis.bdist)
+#}
+
+ #adonis test for brary-curtis
+doadonis.bray <- function(physeq, category) {
+  bdist <- phyloseq::distance(physeq, "bray")
+  col <- as(sample_data(physeq), "data.frame")[ ,category]
+  # Adonis test
+  adonis.bdist <- adonis(bdist ~ col)
+  print(adonis.bdist)
+}
+
+#calculate p-value and R2 by adonis test.
+#be_u_10<- doadonis.U(ps.be.10,"status")
+#be_wu_10<- doadonis.wU(ps.be.10,"status")
+be_bc_10<- doadonis.bray(ps.be.10,"status")
+
+#eac_u_10<- doadonis.U(ps.eac.10,"status")
+#eac_wu_10<- doadonis.wU(ps.eac.10,"status")
+eac_bc.10<-doadonis.bray(ps.eac.10,"status")
+
+#GERD
+be_bc_10.gerd<- doadonis.bray(ps.be.10.rel.gerd,"status")
+be_bc_10.ungerd<- doadonis.bray(ps.be.10.rel.ungerd,"status")
+```
+#use phyloseq to visualize other alpha diversity metrics. 
+```{r, alpha diversity}
+###alpha diversity
+p_rich <- plot_richness(ps.prev, x="status",color="status", measures=c("Observed","shannon")) + stat_boxplot(geom='errorbar', linetype=1, width=0.3)+
+geom_boxplot(aes(color=status),alpha=0.1)+geom_jitter(alpha=0.5, width = 0.15)+
+   theme_bw()+ theme(legend.position = "none",axis.title.y = element_blank())+
+  stat_compare_means(ref.group = "BE_Control",paired = FALSE, size= 2)
+p_rich
+
+#dis by GERD
+p_rich.gerd <- plot_richness(ps.be.10.integer.gerd, x="status",color="status", measures=c("Observed","shannon")) + stat_boxplot(geom='errorbar', linetype=1, width=0.3)+
+geom_boxplot(aes(color=status),alpha=0.1)+geom_jitter(alpha=0.5, width = 0.15)+
+   theme_bw()+ theme(legend.position = "none",axis.title.y = element_blank())+
+  stat_compare_means(ref.group = "BE_Control",paired = FALSE, size= 2)
+p_rich.gerd
+
+p_rich.ungerd <- plot_richness(ps.be.10.integer.ungerd, x="status",color="status", measures=c("Observed","shannon")) + stat_boxplot(geom='errorbar', linetype=1, width=0.3)+
+geom_boxplot(aes(color=status),alpha=0.1)+geom_jitter(alpha=0.5, width = 0.15)+
+   theme_bw()+ theme(legend.position = "none",axis.title.y = element_blank())+
+  stat_compare_means(ref.group = "BE_Control",paired = FALSE, size= 2)
+p_rich.ungerd
+```
+#Differential abundance With DESeq
+```{r, deseq}
+library(apeglm)
+
+gm_mean = function(x, na.rm=TRUE){
+    exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+#get ps
+
+ps.be.10.integer <- subset_samples(ps.prev, status %in% c("BE", "BE_Control"))
+ps.eac.10.integer <- subset_samples(ps.prev, status %in% c("EAC", "EAC_Control"))
+
+```
+#factor and scale continus variates
+```{r, deseq}
+#factor
+ps.be.10.integer@sam_data$status <- as.factor(ps.be.10.integer@sam_data$status)
+ps.be.10.integer@sam_data$smoke <- as.factor(ps.be.10.integer@sam_data$smoke)
+ps.be.10.integer@sam_data$regasp <- as.factor(ps.be.10.integer@sam_data$regasp)
+ps.be.10.integer@sam_data$regaspd <- as.factor(ps.be.10.integer@sam_data$regaspd)
+ps.be.10.integer@sam_data$anyaat <- as.factor(ps.be.10.integer@sam_data$anyaat)
+ps.be.10.integer@sam_data$be_dnatype <- as.factor(ps.be.10.integer@sam_data$be_dnatype)
+ps.be.10.integer@sam_data$gerdall <- as.factor(ps.be.10.integer@sam_data$gerdall)
+ps.be.10.integer@sam_data$race <- as.factor(ps.be.10.integer@sam_data$race)
+
+ps.eac.10.integer@sam_data$status <- as.factor(ps.eac.10.integer@sam_data$status)
+ps.eac.10.integer@sam_data$smoke <- as.factor(ps.eac.10.integer@sam_data$smoke)
+ps.eac.10.integer@sam_data$regasp <- as.factor(ps.eac.10.integer@sam_data$regasp)
+ps.eac.10.integer@sam_data$regaspd <- as.factor(ps.eac.10.integer@sam_data$regaspd)
+ps.eac.10.integer@sam_data$anyaat <- as.factor(ps.eac.10.integer@sam_data$anyaat)
+ps.eac.10.integer@sam_data$be_dnatype <- as.factor(ps.eac.10.integer@sam_data$be_dnatype)
+ps.eac.10.integer@sam_data$gerdall <- as.factor(ps.eac.10.integer@sam_data$gerdall)
+ps.eac.10.integer@sam_data$race <- as.factor(ps.eac.10.integer@sam_data$race)
+
+#scale
+ps.be.10.integer@sam_data$age_cheek <- scale(ps.be.10.integer@sam_data$age_cheek)
+ps.be.10.integer@sam_data$bmicum <- scale(ps.be.10.integer@sam_data$bmicum)
+ps.be.10.integer@sam_data$pckyr <- scale(ps.be.10.integer@sam_data$pckyr)
+ps.be.10.integer@sam_data$ahei2010_noETOHcum <- scale(ps.be.10.integer@sam_data$ahei2010_noETOHcum)
+ps.be.10.integer@sam_data$alcocum <- scale(ps.be.10.integer@sam_data$alcocum)
+ps.be.10.integer@sam_data$yendo <- scale(ps.be.10.integer@sam_data$yendo)
+
+ps.eac.10.integer@sam_data$age_cheek <- scale(ps.eac.10.integer@sam_data$age_cheek)
+ps.eac.10.integer@sam_data$bmicum <- scale(ps.eac.10.integer@sam_data$bmicum)
+ps.eac.10.integer@sam_data$pckyr <- scale(ps.eac.10.integer@sam_data$pckyr)
+ps.eac.10.integer@sam_data$ahei2010_noETOHcum <- scale(ps.eac.10.integer@sam_data$ahei2010_noETOHcum)
+ps.eac.10.integer@sam_data$alcocum <- scale(ps.eac.10.integer@sam_data$alcocum)
+ps.eac.10.integer@sam_data$yendo <- scale(ps.eac.10.integer@sam_data$yendo)
+```
+#get sample by GERD
+```{r}
+#Distinguish data according to gerd symptoms
+ps.be.10.integer.gerd <- subset_samples(ps.be.10.integer, gerdall %in% c("1"))
+ps.be.10.integer.ungerd <- subset_samples(ps.be.10.integer, gerdall %in% c("0"))
+
+ps.eac.10.integer.gerd <- subset_samples(ps.eac.10.integer, gerdall %in% c("1"))
+ps.eac.10.integer.ungerd <- subset_samples(ps.eac.10.integer, gerdall %in% c("0"))
+```
+#get genus file
+```{r}
+ps.be.genus.10.integer<- tax_glom(ps.be.10.integer, taxrank = "Genus")
+ps.eac.genus.10.integer<- tax_glom(ps.eac.10.integer, taxrank = "Genus")
+#GERD
+ps.be.genus.10.gerd <- tax_glom(ps.be.10.integer.gerd, taxrank = "Genus")
+ps.be.genus.10.ungerd<- tax_glom(ps.be.10.integer.ungerd, taxrank = "Genus")
+
+ps.eac.genus.10.gerd <- tax_glom(ps.eac.10.integer.gerd, taxrank = "Genus")
+ps.eac.genus.10.ungerd<- tax_glom(ps.eac.10.integer.ungerd, taxrank = "Genus")
+```
+## adjust 3 matching factor + all other covariates
+```{r, deseq}
+ds.be.10.adjt.all <- phyloseq::phyloseq_to_deseq2(ps.be.10.integer, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum+gerdall)
+
+ds.eac.10.adjt.all <- phyloseq::phyloseq_to_deseq2(ps.eac.10.integer, ~ status+age_cheek+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum+gerdall)
+
+#distinguish by gerd 
+#BE
+ds.be.10.adjt.all.withgerd <- phyloseq::phyloseq_to_deseq2(ps.be.10.integer.gerd, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+
+ds.be.10.adjt.all.ungerd <- phyloseq::phyloseq_to_deseq2(ps.be.10.integer.ungerd, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+
+#EAC
+#ds.eac.10.adjt.all.withgerd <- phyloseq::phyloseq_to_deseq2(ps.eac.10.integer.gerd, ~ status+age_cheek+yendo+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+
+#ds.eac.10.adjt.all.ungerd <- phyloseq::phyloseq_to_deseq2(ps.eac.10.integer.ungerd, ~ status+age_cheek+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+
+```
+# Genus level adjust 3 matching factor + all other covariates
+```{r}
+ds.be.genus.10.adjt.all <- phyloseq::phyloseq_to_deseq2(ps.be.genus.10.integer, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum+gerdall)
+
+ds.eac.genus.10.adjt.all <- phyloseq::phyloseq_to_deseq2(ps.eac.genus.10.integer, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum+gerdall)
+
+#distinguish by gerd
+ds.be.genus.10.adjt.all.withgerd <- phyloseq::phyloseq_to_deseq2(ps.be.genus.10.gerd, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+
+ds.be.genus.10.adjt.all.ungerd <- phyloseq::phyloseq_to_deseq2(ps.be.genus.10.ungerd, ~ status+age_cheek+be_dnatype+yendo+regaspd+anyaat+bmicum+smoke+pckyr+ahei2010_noETOHcum+alcocum)
+```
+####normalization-----
+```{r, deseq}
+#compute geomeans
+geoMeans.be.10.adj.all <- apply(DESeq2::counts(ds.be.10.adjt.all),1,gm_mean)
+geoMeans.eac.10.adj.all <- apply(DESeq2::counts(ds.eac.10.adjt.all),1,gm_mean)
+#genus
+geoMeans.be.genus.10.adj.all <- apply(DESeq2::counts(ds.be.genus.10.adjt.all),1,gm_mean)
+
+geoMeans.eac.genus.10.adj.all<- apply(DESeq2::counts(ds.eac.genus.10.adjt.all),1,gm_mean)
+
+#dis by gerd
+geoMeans.be.10.adj.all.withgerd <- apply(DESeq2::counts(ds.be.10.adjt.all.withgerd),1,gm_mean)
+geoMeans.be.10.adj.all.ungerd <- apply(DESeq2::counts(ds.be.10.adjt.all.ungerd),1,gm_mean)
+##genus
+geoMeans.be.genus.10.adj.all.withgerd <- apply(DESeq2::counts(ds.be.genus.10.adjt.all.withgerd),1,gm_mean)
+geoMeans.be.genus.10.adj.all.ungerd <- apply(DESeq2::counts(ds.be.genus.10.adjt.all.ungerd),1,gm_mean)
+
+####estimate size factors, Median of ratios method
+ds.be.10.adjt.all <- DESeq2::estimateSizeFactors(ds.be.10.adjt.all, geoMeans = geoMeans.be.10.adj.all)
+ds.eac.10.adjt.all <- DESeq2::estimateSizeFactors(ds.eac.10.adjt.all, geoMeans = geoMeans.eac.10.adj.all)
+#genus
+ds.be.genus.10.adjt.all <- DESeq2::estimateSizeFactors(ds.be.genus.10.adjt.all, geoMeans = geoMeans.be.genus.10.adj.all)
+
+#dis by gerd
+ds.be.10.adjt.all.withgerd <- DESeq2::estimateSizeFactors(ds.be.10.adjt.all.withgerd, geoMeans = geoMeans.be.10.adj.all.withgerd)
+ds.be.10.adjt.all.ungerd <- DESeq2::estimateSizeFactors(ds.be.10.adjt.all.ungerd, geoMeans = geoMeans.be.10.adj.all.ungerd)
+#genus
+ds.be.genus.10.adjt.all.withgerd <- DESeq2::estimateSizeFactors(ds.be.genus.10.adjt.all.withgerd, geoMeans = geoMeans.be.genus.10.adj.all.withgerd)
+ds.be.genus.10.adjt.all.ungerd <- DESeq2::estimateSizeFactors(ds.be.genus.10.adjt.all.ungerd, geoMeans = geoMeans.be.genus.10.adj.all.ungerd)
+
+```
+##### run deseq-------------------
+```{r, deseq}
+#model all covariates
+dds.be.10.adjt.all <- DESeq2::DESeq(ds.be.10.adjt.all)
+dds.eac.10.adjt.all <- DESeq2::DESeq(ds.eac.10.adjt.all)
+#genus
+dds.be.genus.10.adjt.all <- DESeq2::DESeq(ds.be.genus.10.adjt.all)
+dds.eac.genus.10.adjt.all <- DESeq2::DESeq(ds.eac.genus.10.adjt.all)
+
+#dis gerd
+dds.be.10.adjt.all.withgerd <- DESeq2::DESeq(ds.be.10.adjt.all.withgerd)
+dds.be.10.adjt.all.ungerd <- DESeq2::DESeq(ds.be.10.adjt.all.ungerd)
+#genus
+dds.be.genus.10.adjt.all.withgerd <- DESeq2::DESeq(ds.be.genus.10.adjt.all.withgerd)
+dds.be.genus.10.adjt.all.ungerd <- DESeq2::DESeq(ds.be.genus.10.adjt.all.ungerd)
+```
+#BE normalized reads extracted
+```{r,normalized}
+#Extracting transformed values
+##BE
+BE_base <- counts(dds.be.10.adjt.all,normalized=TRUE)[,colData(dds.be.10.adjt.all)$status== c("BE")]
+if(is.vector(BE_base)){
+  baseMeanBE <- as.data.frame(BE_base)
+}else{
+  baseMeanBE <- as.data.frame(rowMeans(BE_base))
+}
+colnames(baseMeanBE) <- c("BE")
+##BE_CK
+BE_ck_base <- counts(dds.be.10.adjt.all,normalized=TRUE)[,colData(dds.be.10.adjt.all)$status== c("BE_Control")]
+if(is.vector(BE_ck_base)){
+  baseMeanBE_ck <- as.data.frame(BE_ck_base)
+}else{
+  baseMeanBE_ck <- as.data.frame(rowMeans(BE_ck_base))
+}
+colnames(baseMeanBE_ck) <- c("BE_Control")
+#merge
+be.ck.base <-  cbind(baseMeanBE, baseMeanBE_ck)
+be.ck.base <- rownames_to_column(be.ck.base, var= "ASV")
+#coefficients
+#coef(dds.be.10)[1:4,]
+#coef(dds.be.10.adjt)[1:4,]
+
+```
+###EAC normalized reads extracted
+```{r, deseq}
+##EAC
+EAC_base <- counts(dds.eac.10.adjt.all,normalized=TRUE)[,colData(dds.eac.10.adjt.all)$status== c("EAC")]
+if(is.vector(EAC_base)){
+  baseMeanEAC <- as.data.frame(EAC_base)
+}else{
+  baseMeanEAC <- as.data.frame(rowMeans(EAC_base))
+}
+colnames(baseMeanEAC) <- c("EAC")
+##EAC_CK
+EAC_ck_base <- counts(dds.eac.10.adjt.all,normalized=TRUE)[,colData(dds.eac.10.adjt.all)$status== c("EAC_Control")]
+if(is.vector(EAC_ck_base)){
+  baseMeanEAC_ck <- as.data.frame(EAC_ck_base)
+}else{
+  baseMeanEAC_ck <- as.data.frame(rowMeans(EAC_ck_base))
+}
+colnames(baseMeanEAC_ck) <- c("EAC_Control")
+#merge
+eac.ck.base <-  cbind(baseMeanEAC, baseMeanEAC_ck)
+eac.ck.base <- rownames_to_column(eac.ck.base, var= "ASV")
+```
+# get relative reads of Genus
+```{r, deseq}
+#be relative abundance
+###genus level
+BE_baseg <- counts(dds.be.genus.10.adjt.all,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all)$status== c("BE")]
+if(is.vector(BE_baseg)){
+  baseMeanBEg <- as.data.frame(BE_baseg)
+}else{
+  baseMeanBEg <- as.data.frame(rowMeans(BE_baseg))
+}
+colnames(baseMeanBEg) <- c("BE")
+##BE_CK
+BE_ck_baseg <- counts(dds.be.genus.10.adjt.all,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all)$status== c("BE_Control")]
+if(is.vector(BE_ck_baseg)){
+  baseMeanBE_ckg <- as.data.frame(BE_ck_baseg)
+}else{
+  baseMeanBE_ckg <- as.data.frame(rowMeans(BE_ck_baseg))
+}
+colnames(baseMeanBE_ckg) <- c("BE_Control")
+#merge
+be.ck.base.g <-  cbind(baseMeanBEg, baseMeanBE_ckg)
+be.ck.base.g <- rownames_to_column(be.ck.base.g, var= "ASV")
+#eac relative abundance
+##EAC
+EAC_baseg <- counts(dds.eac.genus.10.adjt.all,normalized=TRUE)[,colData(dds.eac.genus.10.adjt.all)$status== c("EAC")]
+if(is.vector(EAC_baseg)){
+  baseMeanEACg <- as.data.frame(EAC_baseg)
+}else{
+  baseMeanEACg <- as.data.frame(rowMeans(EAC_baseg))
+}
+colnames(baseMeanEACg) <- c("EAC")
+##EAC_CK
+EAC_ck_baseg <- counts(dds.eac.genus.10.adjt.all,normalized=TRUE)[,colData(dds.eac.genus.10.adjt.all)$status== c("EAC_Control")]
+if(is.vector(EAC_ck_baseg)){
+  baseMeanEAC_ckg <- as.data.frame(EAC_ck_baseg)
+}else{
+  baseMeanEAC_ckg <- as.data.frame(rowMeans(EAC_ck_baseg))
+}
+colnames(baseMeanEAC_ckg) <- c("EAC_Control")
+#merge
+eac.ck.base.g <-  cbind(baseMeanEACg, baseMeanEAC_ckg)
+eac.ck.base.g <- rownames_to_column(eac.ck.base.g, var= "ASV")
+```
+#get relative reads with GERD
+```{r, deseq}
+#with GERD
+##BE
+BE_basegd <- counts(dds.be.10.adjt.all.withgerd,normalized=TRUE)[,colData(dds.be.10.adjt.all.withgerd)$status== c("BE")]
+if(is.vector(BE_basegd)){
+  baseMeanBEgd <- as.data.frame(BE_basegd)
+}else{
+  baseMeanBEgd <- as.data.frame(rowMeans(BE_basegd))
+}
+colnames(baseMeanBEgd) <- c("BE")
+##BE_CK
+BE_ck_basegd <- counts(dds.be.10.adjt.all.withgerd,normalized=TRUE)[,colData(dds.be.10.adjt.all.withgerd)$status== c("BE_Control")]
+if(is.vector(BE_ck_basegd)){
+  baseMeanBE_ckgd <- as.data.frame(BE_ck_basegd)
+}else{
+  baseMeanBE_ckgd <- as.data.frame(rowMeans(BE_ck_basegd))
+}
+colnames(baseMeanBE_ckgd) <- c("BE_Control")
+#merge
+be.ck.base.gerd <-  cbind(baseMeanBEgd, baseMeanBE_ckgd)
+be.ck.base.gerd <- rownames_to_column(be.ck.base.gerd, var= "ASV")
+
+#without GERD
+dds.be.genus.10.adjt.all.ungerd
+##BE
+BE_baseugd <- counts(dds.be.10.adjt.all.ungerd,normalized=TRUE)[,colData(dds.be.10.adjt.all.ungerd)$status== c("BE")]
+if(is.vector(BE_baseugd)){
+  baseMeanBEugd <- as.data.frame(BE_baseugd)
+}else{
+  baseMeanBEugd <- as.data.frame(rowMeans(BE_baseugd))
+}
+colnames(baseMeanBEugd) <- c("BE")
+##BE_CK
+BE_ck_baseugd <- counts(dds.be.10.adjt.all.ungerd,normalized=TRUE)[,colData(dds.be.10.adjt.all.ungerd)$status== c("BE_Control")]
+if(is.vector(BE_ck_baseugd)){
+  baseMeanBE_ckugd <- as.data.frame(BE_ck_baseugd)
+}else{
+  baseMeanBE_ckugd <- as.data.frame(rowMeans(BE_ck_baseugd))
+}
+colnames(baseMeanBE_ckugd) <- c("BE_Control")
+#merge
+be.ck.base.ungerd <-  cbind(baseMeanBEugd, baseMeanBE_ckugd)
+be.ck.base.ungerd <- rownames_to_column(be.ck.base.ungerd, var= "ASV")
+```
+#get Genus relative reads with GERD
+```{r}
+#with gerd
+BE_baseggd <- counts(dds.be.genus.10.adjt.all.withgerd,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all.withgerd)$status== c("BE")]
+if(is.vector(BE_baseggd)){
+  baseMeanBEggd <- as.data.frame(BE_baseggd)
+}else{
+  baseMeanBEggd <- as.data.frame(rowMeans(BE_baseggd))
+}
+colnames(baseMeanBEggd) <- c("BE")
+##BE_CK
+BE_ck_baseggd <- counts(dds.be.genus.10.adjt.all.withgerd,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all.withgerd)$status== c("BE_Control")]
+if(is.vector(BE_ck_baseggd)){
+  baseMeanBE_ckggd <- as.data.frame(BE_ck_baseggd)
+}else{
+  baseMeanBE_ckggd <- as.data.frame(rowMeans(BE_ck_baseggd))
+}
+colnames(baseMeanBE_ckggd) <- c("BE_Control")
+#merge
+be.ck.base.g.gerd <-  cbind(baseMeanBEgd, baseMeanBE_ckgd)
+be.ck.base.g.gerd <- rownames_to_column(be.ck.base.g.gerd, var= "ASV")
+
+#without gerd
+BE_basegugd <- counts(dds.be.genus.10.adjt.all.ungerd,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all.ungerd)$status== c("BE")]
+if(is.vector(BE_basegugd)){
+  baseMeanBEgugd <- as.data.frame(BE_basegugd)
+}else{
+  baseMeanBEgugd <- as.data.frame(rowMeans(BE_basegugd))
+}
+colnames(baseMeanBEgugd) <- c("BE")
+##BE_CK
+BE_ck_basegugd <- counts(dds.be.genus.10.adjt.all.ungerd,normalized=TRUE)[,colData(dds.be.genus.10.adjt.all.ungerd)$status== c("BE_Control")]
+if(is.vector(BE_ck_basegugd)){
+  baseMeanBE_ckgugd <- as.data.frame(BE_ck_basegugd)
+}else{
+  baseMeanBE_ckgugd <- as.data.frame(rowMeans(BE_ck_basegugd))
+}
+colnames(baseMeanBE_ckgugd) <- c("BE_Control")
+#merge
+be.ck.base.g.ungerd <-  cbind(baseMeanBEgugd, baseMeanBE_ckgugd)
+be.ck.base.g.ungerd <- rownames_to_column(be.ck.base.g.ungerd, var= "ASV")
+
+```
+#get results
+```{r,results}
+#plotMA shows the results
+plotMA(dds.be.10.match3)
+plotMA(dds.be.10.adjt.all)
+plotMA(dds.be.10.adjt.all.gerd)
+
+#########get deseq result----------
+#retrieve the results and use the control group as the last one (reference) in the contrast formula
+
+res.dds.be.10.adjt.all <- results(dds.be.10.adjt.all, contrast=c("status", "BE", "BE_Control"))
+res.dds.eac.10.adjt.all <- results(dds.eac.10.adjt.all, contrast=c("status", "EAC", "EAC_Control"))
+#genus
+res.dds.be.genus.10.adjt.all <- results(dds.be.genus.10.adjt.all, contrast=c("status", "BE", "BE_Control"))
+
+res.dds.eac.genus.10.adjt.all <- results(dds.eac.genus.10.adjt.all, contrast=c("status", "EAC", "EAC_Control"))
+
+#dis by gerd
+res.dds.be.10.adjt.all.withgerd <- results(dds.be.10.adjt.all.withgerd, contrast=c("status", "BE", "BE_Control"))
+res.dds.be.10.adjt.all.ungerd <- results(dds.be.10.adjt.all.ungerd, contrast=c("status", "BE", "BE_Control"))
+
+summary(res.dds.be.10.adjt.all.ungerd)
+
+#genus dis by gerd
+res.dds.be.genus.10.adjt.all.withgerd <- results(dds.be.genus.10.adjt.all.withgerd, contrast=c("status", "BE", "BE_Control"),cooksCutoff = FALSE)
+res.dds.be.genus.10.adjt.all.ungerd <- results(dds.be.genus.10.adjt.all.ungerd, contrast=c("status", "BE", "BE_Control"),cooksCutoff = FALSE)
+
+#get results data.frame
+res.dds.be.10.adjt.all <- as.data.frame(res.dds.be.10.adjt.all[,]) %>%
+  rownames_to_column(., var = 'id')
+res.dds.eac.10.adjt.all <- as.data.frame(res.dds.eac.10.adjt.all[,])%>%
+  rownames_to_column(., var = 'id')
+#genus
+res.dds.be.genus.10.adjt.all <- as.data.frame(res.dds.be.genus.10.adjt.all[,]) %>%
+  rownames_to_column(., var = 'id')
+
+res.dds.eac.genus.10.adjt.all <- as.data.frame(res.dds.eac.genus.10.adjt.all[,]) %>%
+  rownames_to_column(., var = 'id')
+
+#dis by gerd
+res.dds.be.10.adjt.all.withgerd <- as.data.frame(res.dds.be.10.adjt.all.withgerd[,]) %>%
+  rownames_to_column(., var = 'id')
+res.dds.be.10.adjt.all.ungerd <- as.data.frame(res.dds.be.10.adjt.all.ungerd[,]) %>%
+  rownames_to_column(., var = 'id')
+#genus
+res.dds.be.genus.10.adjt.all.withgerd <- as.data.frame(res.dds.be.genus.10.adjt.all.withgerd[,]) %>%
+  rownames_to_column(., var = 'id')
+res.dds.be.genus.10.adjt.all.ungerd <- as.data.frame(res.dds.be.genus.10.adjt.all.ungerd[,]) %>%
+  rownames_to_column(., var = 'id')
+
+#get annotation
+res.dds.be.10.adjt.all.taxa= cbind(as(res.dds.be.10.adjt.all,"data.frame"), as(tax_table(ps.be.10.integer)[res.dds.be.10.adjt.all$id, ], "matrix"))
+#eac
+res.dds.eac.10.adjt.all.taxa= cbind(as(res.dds.eac.10.adjt.all,"data.frame"), as(tax_table(ps.eac.10.integer)[res.dds.eac.10.adjt.all$id, ], "matrix"))
+#genus
+res.dds.be.genus.10.adjt.all.taxa= cbind(as(res.dds.be.genus.10.adjt.all,"data.frame"), as(tax_table(ps.be.genus.10.integer)[res.dds.be.genus.10.adjt.all$id, ], "matrix"))
+res.dds.eac.genus.10.adjt.all.taxa= cbind(as(res.dds.eac.genus.10.adjt.all,"data.frame"), as(tax_table(ps.eac.genus.10.integer)[res.dds.eac.genus.10.adjt.all$id, ], "matrix"))
+
+#dis by gerd
+res.dds.be.10.adjt.all.withgerd.taxa= cbind(as(res.dds.be.10.adjt.all.withgerd,"data.frame"), as(tax_table(ps.be.10.integer.gerd)[res.dds.be.10.adjt.all.withgerd$id, ], "matrix"))
+
+res.dds.be.10.adjt.all.ungerd.taxa= cbind(as(res.dds.be.10.adjt.all.ungerd,"data.frame"), as(tax_table(ps.be.10.integer.ungerd)[res.dds.be.10.adjt.all.ungerd$id, ], "matrix"))
+
+#genus
+#dis by gerd
+res.dds.be.genus.10.adjt.all.withgerd.taxa= cbind(as(res.dds.be.genus.10.adjt.all.withgerd,"data.frame"), as(tax_table(ps.be.genus.10.gerd)[res.dds.be.genus.10.adjt.all.withgerd$id, ], "matrix"))
+
+res.dds.be.genus.10.adjt.all.ungerd.taxa= cbind(as(res.dds.be.genus.10.adjt.all.ungerd,"data.frame"), as(tax_table(ps.be.genus.10.ungerd)[res.dds.be.genus.10.adjt.all.ungerd$id, ], "matrix"))
+
+```
+#add relative abundance
+```{r,}
+#be
+res.dds.be.10.adjt.all.taxa.2 <- merge(res.dds.be.10.adjt.all.taxa, be.ck.base, by.x="id" , by.y = "ASV")
+
+#eac
+res.dds.eac.10.adjt.all.taxa.2 <- merge(res.dds.eac.10.adjt.all.taxa, eac.ck.base, by.x="id" , by.y = "ASV")
+
+#genus
+res.dds.be.genus.10.adjt.all.taxa.2 <- merge(res.dds.be.genus.10.adjt.all.taxa, be.ck.base.g, by.x="id" , by.y = "ASV")
+
+res.dds.eac.genus.10.adjt.all.taxa.2 <- merge(res.dds.eac.genus.10.adjt.all.taxa, eac.ck.base.g, by.x="id" , by.y = "ASV")
+
+#dis by gerd
+res.dds.be.10.adjt.all.withgerd.taxa.2 <- merge(res.dds.be.10.adjt.all.withgerd.taxa, be.ck.base.gerd, by.x="id" , by.y = "ASV")
+res.dds.be.10.adjt.all.ungerd.taxa.2 <- merge(res.dds.be.10.adjt.all.ungerd.taxa, be.ck.base.ungerd, by.x="id" , by.y = "ASV")
+
+#genus
+res.dds.be.genus.10.adjt.all.withgerd.taxa.2 <- merge(res.dds.be.genus.10.adjt.all.withgerd.taxa, be.ck.base.g.gerd, by.x="id" , by.y = "ASV")
+res.dds.be.genus.10.adjt.all.ungerd.taxa.2 <- merge(res.dds.be.genus.10.adjt.all.ungerd.taxa, be.ck.base.g.ungerd, by.x="id" , by.y = "ASV")
+
+write.csv(res.dds.be.10.match3.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Species/deseq2_be_results_match3.csv")
+write.csv(res.dds.be.10.adjt.all.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Species/deseq2_be_adjust_results_all.csv")
+#genus
+write.csv(res.dds.be.genus.10.adjt.all.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Genus/deseq2_be_genus_adjust_results_all.csv")
+
+write.csv(res.dds.eac.genus.10.adjt.allg.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Genus/deseq2_eac_genus_adjust_results_allg.csv")
+
+#GERD
+write.csv(res.dds.be.10.adjt.all.withgerd.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Species/deseq2_be_adjust_results_all_withgerd.csv")
+write.csv(res.dds.be.10.adjt.all.ungerd.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Species/deseq2_be_adjust_results_all_ungerd.csv")
+
+write.csv(res.dds.be.genus.10.adjt.all.withgerd.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Genus/deseq2_be_genus_adjust_results_all_withgerd.csv")
+write.csv(res.dds.be.genus.10.adjt.all.ungerd.taxa.2, "C:/Users/yu.w/Box/YuWang/Progress/16soral/results/deseq/Genus/deseq2_be_genus_adjust_results_all_ungerd.csv")
+
+#eac
+write.csv(res.dds.eac.10.match3.taxa.2, "deseq2_eac_results_match3.csv")
+write.csv(res.dds.eac.10.adjt.all.taxa.2, "deseq2_eac_adjust_results_all.csv")
+write.csv(res.dds.eac.10.adjt.all.gerd.taxa.2, "deseq2_eac_adjust_results_all_gerd.csv")
+
+#plot
+px = tapply(res.dds.be.taxa$log2FoldChange, res.dds.be.taxa$Family, function(px) max(px))
+px = sort(px, TRUE)
+res.dds.be.taxa$Family = factor(as.character(res.dds.be.taxa$Family), levels=names(px))
+p3 <- ggplot(res.dds.be.taxa, aes(x = Family, y = log2FoldChange, color = Phylum)) +
+  geom_point(size = 4) +
+  labs(y = "\nLog2 Fold-Change ", x = "") +theme_bw()+
+  theme(axis.text.x = element_text(color = "black", size = 12),
+        axis.text.y = element_text(color = "black", size = 12,face = "italic"),
+        axis.title.y = element_text(size = 14),
+        axis.title.x = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank(),
+        legend.position = "bottom") +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype="dotted")
+p3 
+```
+#ASV distribution of status
+```{r, ASV}
+
+ps.be.be <- subset_samples(ps.be.rel, status %in% c("BE"))
+ps.be.ck <- subset_samples(ps.be.rel, status %in% c("BE_Control"))
+ps.eac.eac <- subset_samples(ps.eac.rel, status %in% c("EAC"))
+ps.eac.ck <- subset_samples(ps.eac.rel, status %in% c("EAC_Control"))
+
+BE_ASV <- data.frame(otu_table(ps.be.be)) %>%
+  mutate(sum = rowSums(.)) %>%
+  rownames_to_column(., var= 'id')
+BECK_ASV <- data.frame(otu_table(ps.be.ck)) %>%
+  mutate(sum = rowSums(.)) %>%
+  rownames_to_column(., var= 'id')
+eac_ASV <- data.frame(otu_table(ps.eac.eac)) %>%
+  mutate(sum = rowSums(.)) %>%
+  rownames_to_column(., var= 'id')
+eacCK_ASV <- data.frame(otu_table(ps.eac.ck)) %>%
+  mutate(sum = rowSums(.)) %>%
+  rownames_to_column(., var= 'id')
+
+be.box <- BE_ASV[,c(1,120)] %>%
+ subset(., .$sum >0) %>%
+  mutate(log2 = log2(.$sum)) %>%
+  mutate(status = 'BE')
+beCK.box <- BECK_ASV[,c(1,112)] %>%
+ subset(., .$sum >0) %>%
+  mutate(log2 = log2(.$sum)) %>%
+  mutate(status = 'BE_Control')
+eac.box <- eac_ASV[,c(1,11)] %>%
+ subset(., .$sum >0) %>%
+  mutate(log2 = log2(.$sum)) %>%
+  mutate(status = 'EAC')
+eacCK.box <- eacCK_ASV[,c(1,11)] %>%
+ subset(., .$sum >0) %>%
+  mutate(log2 = log2(.$sum)) %>%
+  mutate(status = 'EAC_Control')
+
+beck.box <- res.dds.be.taxa.3[,c(1,19)] 
+beck.box2 <- beck.box[which(beck.box$be_ck_rel_abundance >0),]
+beck.box2$lg <- log2(beck.box2$be_ck_rel_abundance)
+colnames(beck.box2)[2] <- c('mean')
+beck.box2$status <- 'BE_Control'
+
+dis_be.ck <- rbind(be.box2,beck.box2)
+
+pg8<-ggplot(dis_be.ck, aes(x=dis_be.ck$status, y=dis_be.ck$lg))+ 
+  geom_boxplot(aes(fill= status ))+
+  geom_jitter(aes(x=dis_be.ck$status, y=dis_be.ck$lg))+
+  #geom_errorbar(width=0.9)+
+  #stat_boxplot(geom='errorbar', linetype=1, width=0.3)+
+  theme(axis.title.x = element_blank())+
+  labs(x= "Status", y="Relative Abundance (log2)")+
+  #scale_y_continuous(breaks = seq(0, 90000，30000))
+
+#number of 0 reads samples in ASV after 
+f0<- function(x)sum(x==0)
+#be samples
+asv.0.be.samp.numb <- data.frame(apply(otu.table.be, 1, f0))
+colnames(asv.0.be.samp.numb)[1] <- "BE"
+
+asv.0.be.ck.samp.numb <- data.frame(apply(otu.table.be.ck, 1, f0))
+colnames(asv.0.be.ck.samp.numb)[1] <- "BE_Control"
+
+asv.be_ck.sam.num <- data.frame(cbind(asv.0.be.samp.numb, asv.0.be.ck.samp.numb)) %>%
+  rownames_to_column(., var= 'id')
+
+#count % range
+nrow(asv.be_ck.sam.num[which(asv.be_ck.sam.num$BE_p <0.9 & asv.be_ck.sam.num$BE_p >0.8),])
+
+#EAC samples
+asv.0.eac.samp.numb <- data.frame(apply(otu.table.eac, 1, f0))
+colnames(asv.0.eac.samp.numb)[1] <- "EAC"
+
+asv.0.eac.ck.samp.numb <- data.frame(apply(otu.table.eac.ck, 1, f0))
+colnames(asv.0.eac.ck.samp.numb)[1] <- "EAC_Control"
+
+asv.eac_ck.sam.num <- cbind(asv.0.eac.samp.numb, asv.0.eac.ck.samp.numb)
+
+write.csv(asv.be_ck.sam.num, "asv.be.sample.number.csv")
+write.csv(asv.eac_ck.sam.num, "asv.eac.sample.number.csv")
+
+```
+#MaAslin2
+```{r}
+#library
+library(Maaslin2)
+library(grid)
+library(ggpubr)
+library(tidyverse)
+library(gridExtra)
+library(cowplot)
+#BE
+#input file
+ps.be.massline <- subset_samples(ps.prev, status %in% c("BE", "BE_Control"))
+ps.be.massline@sam_data$bmicum[224] <- 26.54948
+ps.be.massline@sam_data$smoke[180] <- 0
+ps.be.massline@sam_data$smoke[94] <- 0
+ps.be.massline@sam_data$pckyr[180] <- 0
+ps.be.massline@sam_data$pckyr[94] <- 0
+ps.be.massline@sam_data$ahei2010_noETOHcum[12] <- 48.09357
+ps.be.massline@sam_data$ahei2010_noETOHcum[223] <- 48.09357
+ps.be.massline@sam_data$ahei2010_noETOHcum[129] <- 48.48196
+ps.be.massline@sam_data$gerdall[is.na(ps.be.massline@sam_data$gerdall)] <- 0
+ps.be.massline@sam_data$alcocum[12] <- 6.102538 
+ps.be.massline@sam_data$alcocum[223] <- 6.102538
+#metadata
+metadata_be <- data.frame(ps.be.massline@sam_data)
+rownames(metadata_be) <- NULL
+metadata_be$status <- factor(metadata_be$status, levels= c("BE_Control", "BE"))
+
+#feature
+feature_be_species_filter <- as.data.frame(t(as.data.frame(ps.be.massline@otu_table)))
+
+#dis by gerd
+ps.be.masl.gerd <- subset_samples(ps.be.massline, gerdall %in% c("1"))
+ps.be.masl.ungerd <- subset_samples(ps.be.massline, gerdall %in% c("0"))
+
+#metadata
+metadata_be.gerd <- data.frame(ps.be.masl.gerd@sam_data)
+rownames(metadata_be.gerd) <- NULL
+metadata_be.gerd$status <- factor(metadata_be.gerd$status, levels= c("BE_Control", "BE"))
+
+metadata_be.ungerd <- data.frame(ps.be.masl.ungerd@sam_data)
+rownames(metadata_be.ungerd) <- NULL
+metadata_be.ungerd$status <- factor(metadata_be.ungerd$status, levels= c("BE_Control", "BE"))
+
+#feature
+feature_be_species_filter.gerd <- as.data.frame(t(as.data.frame(ps.be.masl.gerd@otu_table)))
+
+feature_be_species_filter.ungerd <- as.data.frame(t(as.data.frame(ps.be.masl.ungerd@otu_table)))
+
+#normlized
+featureNormlized <- 
+        sweep(feature_be_species_filter,
+        1,
+        STATS = rowSums(feature_be_species_filter),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+
+#gerd
+featureNormlized.gerd <- 
+        sweep(feature_be_species_filter.gerd,
+        1,
+        STATS = rowSums(feature_be_species_filter.gerd),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+#wiout-gerd
+featureNormlized.ungerd <- 
+        sweep(feature_be_species_filter.ungerd,
+        1,
+        STATS = rowSums(feature_be_species_filter.ungerd),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+#maaslin2
+maaslin2covariates <- c("age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")
+maaslin2covariates2 <- c("age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum")
+#Create folder
+dir.create(file.path("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/"))
+
+Maaslin2(
+    featureNormlized,
+    metadata_be,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/all/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates)
+  )
+
+#dis by GERD
+Maaslin2(
+    featureNormlized.gerd,
+    metadata_be.gerd,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/GERD/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates2)
+  )
+
+Maaslin2(
+    featureNormlized.ungerd,
+    metadata_be.ungerd,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/UNGERD/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates2)
+  )
+
+```
+#Gebus level (#size=57)
+```{r}
+ps.be.masl.genus<- tax_glom(ps.be.massline, taxrank = "Genus")
+
+#metadata
+metadata_be.genus <- data.frame(ps.be.masl.genus@sam_data)
+rownames(metadata_be.genus) <- NULL
+metadata_be.genus$status <- factor(metadata_be.genus$status, levels= c("BE_Control", "BE"))
+
+#feature
+feature_be_genus_filter <- as.data.frame(t(as.data.frame(ps.be.masl.genus@otu_table)))
+
+#GERD
+ps.be.masl.genus.gerd <- tax_glom(ps.be.masl.gerd, taxrank = "Genus")
+ps.be.masl.genus.ungerd<- tax_glom(ps.be.masl.ungerd, taxrank = "Genus")
+
+#metadata
+metadata_be.genus.gerd <- data.frame(ps.be.masl.genus.gerd@sam_data)
+rownames(metadata_be.genus.gerd) <- NULL
+metadata_be.genus.gerd$status <- factor(metadata_be.genus.gerd$status, levels= c("BE_Control", "BE"))
+
+metadata_be.genus.ungerd <- data.frame(ps.be.masl.genus.ungerd@sam_data)
+rownames(metadata_be.genus.ungerd) <- NULL
+metadata_be.genus.ungerd$status <- factor(metadata_be.genus.ungerd$status, levels= c("BE_Control", "BE"))
+
+#feature
+feature_be_genus_filter.gerd <- as.data.frame(t(as.data.frame(ps.be.masl.genus.gerd@otu_table)))
+
+feature_be_genus_filter.ungerd <- as.data.frame(t(as.data.frame(ps.be.masl.genus.ungerd@otu_table)))
+
+#normlized
+featureNormlized.genus <- 
+        sweep(feature_be_genus_filter,
+        1,
+        STATS = rowSums(feature_be_genus_filter),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+
+#gerd
+featureNormlized.genus.gerd <- 
+        sweep(feature_be_genus_filter.gerd,
+        1,
+        STATS = rowSums(feature_be_genus_filter.gerd),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+#wiout-gerd
+featureNormlized.genus.ungerd <- 
+        sweep(feature_be_genus_filter.ungerd,
+        1,
+        STATS = rowSums(feature_be_genus_filter.ungerd),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+#MaAslin2
+Maaslin2(
+    featureNormlized.genus,
+    metadata_be.genus,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/allgenus/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates)
+  )
+#dis by GERD
+Maaslin2(
+    featureNormlized.genus.gerd,
+    metadata_be.genus.gerd,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/GERD-genus/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates2)
+  )
+
+Maaslin2(
+    featureNormlized.genus.ungerd,
+    metadata_be.genus.ungerd,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/UNGERD-genus/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates2)
+  )
+```
+#EAC
+```{r}
+ps.eac.massline <- subset_samples(ps.prev, status %in% c("EAC", "EAC_Control"))
+
+#metadata
+metadata_eac <- data.frame(ps.eac.massline@sam_data)
+rownames(metadata_eac) <- NULL
+metadata_eac$status <- factor(metadata_eac$status, levels= c("EAC_Control", "EAC"))
+
+#feature
+feature_eac_species_filter <- as.data.frame(t(as.data.frame(ps.eac.massline@otu_table)))
+
+#normlized
+featureNormlized.eac <- 
+        sweep(feature_eac_species_filter,
+        1,
+        STATS = rowSums(feature_eac_species_filter),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+
+#maaslin2
+maaslin2covariates3 <- c("age_cheek","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")
+
+Maaslin2(
+    featureNormlized.eac,
+    metadata_eac,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/EAC/species/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates3)
+  )
+
+#Genus
+ps.eac.masl.genus<- tax_glom(ps.eac.massline, taxrank = "Genus")
+
+#metadata
+metadata_eac.genus <- data.frame(ps.eac.masl.genus@sam_data)
+rownames(metadata_eac.genus) <- NULL
+metadata_eac.genus$status <- factor(metadata_eac.genus$status, levels= c("EAC_Control", "EAC"))
+
+#feature
+feature_eac_genus_filter <- as.data.frame(t(as.data.frame(ps.eac.masl.genus@otu_table)))
+
+#normlized
+featureNormlized.eac.genus <- 
+        sweep(feature_eac_genus_filter,
+        1,
+        STATS = rowSums(feature_eac_genus_filter),
+        FUN = "/") %>%
+  rownames_to_column(., var= "fastQId")
+
+
+Maaslin2(
+    featureNormlized.eac.genus,
+    metadata_eac.genus,
+    paste0("C:/Users/yu.w/Box/YuWang/Progress/16soral/results/MaAslin/EAC/genus/"),
+    standardize = FALSE,
+    normalization = "NONE",
+    transform = "AST",
+    random_effects = NULL,
+    fixed_effects = c("status", maaslin2covariates3)
+  )
+```
+# new PERMANOVA method from Wenjie
+```{r pressure, echo=FALSE}
+PERMANOVA_repeat_measures <- function(D,
+                                      permute_within,
+                                      blocks = NULL,
+                                      block_data,
+                                      permutations = 999,
+                                      metadata_order = c(names(permute_within), names(block_data)),
+                                      na.rm = F) {
+  # Make sure D is a dist object
+  if (class(D) != "dist") {
+    stop("D must be a dist object")
+  }
+  
+  # Default to free permutations if blocks is not given
+  if (!missing(block_data) && is.null(blocks)) {
+    stop("blocks must be given if block_data is present")
+  } else if (is.null(blocks)) {
+    blocks <- rep(1, nrow(permute_within))
+    block_data <- as.data.frame(matrix(0, nrow = 1, ncol = 0))
+  } else if (length(unique(blocks)) == 1) {
+    warning("blocks only contains one unique value")
+  }
+  
+  # Ensure no metadata overlap between permute_within and block_data
+  if (length(intersect(names(permute_within), names(block_data))) > 0) {
+    stop("metadata is repeated across permute_within and block_data")
+  }
+  
+  # Ensure that metadata_order only contains stuff in permute_within and block_data
+  if (length(setdiff(metadata_order, union(
+    names(permute_within), names(block_data)
+  ))) > 0) {
+    stop("metadata_order contains metadata not in permute_within and block_data")
+  }
+  
+  # Ensure that the data in permute_within matches that in dist
+  ord <- rownames(as.matrix(D))
+  if (length(ord) != nrow(permute_within) ||
+      length(blocks) != length(ord)) {
+    stop("blocks, permute_within, and D are not the same size")
+  }
+  if (is.null(rownames(permute_within))) {
+    warning("permute_within has no rownames - can't verify sample orders")
+  } else if (!all(ord == rownames(permute_within))) {
+    stop("rownames do not match between permute_within and D")
+  }
+  
+  # Ensure matching between blocks and block_data
+  if (any(is.na(blocks))) {
+    stop("NAs are not allowed in blocks")
+  }
+  if (is.factor(blocks)) {
+    if (any(!(levels(blocks) %in% rownames(block_data)))) {
+      stop("not all block levels are contained in block_data")
+    }
+    # Match blocks with block_data and discard level information
+    block_data <-
+      block_data[match(levels(blocks), rownames(block_data)), , drop = F]
+    blocks <- as.numeric(blocks)
+  } else if (is.numeric(blocks)) {
+    if (blocks < 1 || max(blocks) > nrow(block_data)) {
+      stop("Numeric blocks has indices out of range")
+    }
+  } else if (is.character(blocks)) {
+    if (is.null(rownames(block_data)) ||
+        !all(blocks %in% rownames(block_data))) {
+      stop("blocks does not match the rownames of block_data")
+    }
+    # Transform to numeric
+    blocks <- match(blocks, rownames(block_data))
+  } else {
+    stop("blocks must be a numeric, factor, or character vector")
+  }
+  
+  # Error out on NA metadata rather than allowing adonis to error out with
+  # a totally nonsensical error message
+  if (any(is.na(permute_within)) || any(is.na(block_data))) {
+    if (na.rm) {
+      n_prerm <- length(blocks)
+      
+      # Remove NAs in block_data
+      hasna <-
+        (rowSums(is.na(block_data)) > 0) |
+        (sapply(split(rowSums(
+          is.na(permute_within)
+        ) > 0, blocks), mean) == 1)
+      block_data <- block_data[!hasna, , drop = F]
+      keep <- !hasna[blocks]
+      blocks <- cumsum(!hasna)[blocks]
+      
+      blocks <- blocks[keep]
+      permute_within <- permute_within[keep, , drop = F]
+      D <- as.matrix(D)[keep, keep]
+      # block_data is not subset, as the rows with NAs are no longer referenced in blocks
+      
+      # Remove NAs in permute_within
+      keep <- rowSums(is.na(permute_within)) == 0
+      blocks <- blocks[keep]
+      permute_within <- permute_within[keep, , drop = F]
+      D <- as.dist(D[keep, keep])
+      
+      if (length(blocks) < ncol(permute_within) + ncol(block_data)) {
+        stop(
+          sprintf(
+            "After omitting samples with NAs, the number of samples (%d) is less than the number of metadata (%d)",
+            length(blocks),
+            ncol(permute_within) + ncol(block_data)
+          )
+        )
+      } else if (length(blocks) < n_prerm * 0.5) {
+        warning(sprintf(
+          "Removed %d samples with NA metadata",
+          n_prerm - length(blocks)
+        ))
+      }
+    } else {
+      stop("Some metadata is NA! adonis does not support any NA in the metadata")
+    }
+  }
+  
+  # Warn on some suspicious input
+  persample <-
+    apply(permute_within, 1, function(x)
+      is.factor(x) && !any(duplicated(x)))
+  if (any(persample)) {
+    warning(sprintf(
+      "%s in permute_within has one DOF per sample.",
+      colnames(permute_within)[which(persample)[1]]
+    ))
+  }
+  if (length(unique(blocks)) < nrow(block_data)) {
+    warning(
+      "Not all blocks have a sample associated with them. Block permutations will still be performed over the full set of blocks - if this is not desired, subset block_data to only the blocks which appear in the data."
+    )
+  }
+  if (!any(duplicated(blocks))) {
+    warning("blocks contains no duplicated elements")
+  }
+
+  library(vegan)
+  library(permute)
+  
+  # Test statistic from non-permuted data
+  mtdat <- cbind(permute_within, block_data[blocks, , drop = F]) # I double checked, this is correct
+  ad <-
+    adonis(D ~ ., permutations = 999, data = mtdat[, metadata_order, drop = F])
+  R2 <- ad$aov.tab$R2
+  names(R2) <- rownames(ad$aov.tab)
+  
+  # Permutations
+  nullsamples <- matrix(NA, nrow = length(R2), ncol = permutations)
+  for (i in seq_len(permutations)) {
+    within.i <-
+      shuffle(nrow(permute_within), control = how(blocks = blocks))
+    block.i <- sample(seq_len(nrow(block_data)))
+    mtdat <- cbind(permute_within[within.i, , drop = F],
+                   block_data[block.i, , drop = F][blocks, , drop = F])
+    perm.ad <-
+      adonis(D ~ ., permutations = 0, data = mtdat[, metadata_order, drop = F])
+    
+    nullsamples[, i] <- perm.ad$aov.tab$R2
+  }
+  
+  # For residuals, test the other direction (i.e. p-value of all covariates)
+  n <- length(R2)
+  R2[n - 2] <- 1 - R2[n - 2]
+  nullsamples[n - 2, ] <- 1 - nullsamples[n - 2, ]
+  
+  # P value calculation similar to adonis's
+  exceedances <- rowSums(nullsamples > R2)
+  P <- (exceedances + 1) / (permutations + 1)
+  
+  P[n] <- NA    # No p-values for "Total"
+  ad$aov.tab$`Pr(>F)` <- P
+  
+  return (ad)
+}
+```
+#prepare file for PERMANOVA
+```{r}
+ metadata_be <- separate(metadata_be, fastQId, c("nm","subjectId"), sep = "rcbc", remove = FALSE, convert = TRUE)
+
+featureNormlized <- 
+        sweep(feature_be_species_filter,
+        1,
+        STATS = rowSums(feature_be_species_filter),
+        FUN = "/") %>%
+  rownames_to_column(., var ="id") %>%
+  separate(., id, c("nm","subjectId"), sep = "rcbc", convert = TRUE) %>%
+  column_to_rownames(., var = "subjectId")
+featureNormlized <- featureNormlized[,-1]
+featuresBrayCurtisMatrix_be <- vegdist(featureNormlized, "bray")
+```
+#run permanova
+```{r}
+# Step 1, we need a value that ONLY contains non duplicate ID without "SF_XX"
+participants <- factor(metadata_be$subjectId)
+
+# Step 2 , with all metadata that varies within participant
+metadataRandom <- select(metadata_be, c("subjectId","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")) %>%
+  column_to_rownames(., var = "subjectId")
+
+# Step 3, we need a separate data frame that only contains fixed effect
+metadataFixed <-
+  select(metadata_be, c("subjectId", "status")) %>% remove_rownames(.) %>% distinct(.) %>%
+  column_to_rownames(.,"subjectId")
+
+# Step 4, permanova
+PERMANOVA_repeat_measures(
+  featuresBrayCurtisMatrix_be,
+  permute_within = metadataRandom,
+  blocks = participants,
+  block_data = metadataFixed,
+  permutations = 999,
+  metadata_order = c( "status","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")
+)
+
+```
+#permanova by GERD
+```{r}
+#metadata
+metadata_be.gerd <- separate(metadata_be.gerd, fastQId, c("nm","subjectId"), sep = "rcbc", remove = FALSE, convert = TRUE)
+metadata_be.ungerd <- separate(metadata_be.ungerd, fastQId, c("nm","subjectId"), sep = "rcbc", remove = FALSE, convert = TRUE)
+
+#features
+featureNormlized.gerd <- 
+        sweep(feature_be_species_filter.gerd,
+        1,
+        STATS = rowSums(feature_be_species_filter.gerd),
+        FUN = "/") %>%
+  rownames_to_column(., var ="id") %>%
+  separate(., id, c("nm","subjectId"), sep = "rcbc", convert = TRUE) %>%
+  column_to_rownames(., var = "subjectId")
+featureNormlized.gerd <- featureNormlized.gerd[,-1]
+featuresBrayCurtisMatrix_be.gerd <- vegdist(featureNormlized.gerd, "bray")
+
+featureNormlized.ungerd <- 
+        sweep(feature_be_species_filter.ungerd,
+        1,
+        STATS = rowSums(feature_be_species_filter.ungerd),
+        FUN = "/") %>%
+  rownames_to_column(., var ="id") %>%
+  separate(., id, c("nm","subjectId"), sep = "rcbc", convert = TRUE) %>%
+  column_to_rownames(., var = "subjectId")
+featureNormlized.ungerd <- featureNormlized.ungerd[,-1]
+featuresBrayCurtisMatrix_be.ungerd <- vegdist(featureNormlized.ungerd, "bray")
+
+#run permanova
+# Step 1, we need a value that ONLY contains non duplicate ID without "SF_XX"
+participants.gerd <- factor(metadata_be.gerd$subjectId)
+participants.ungerd <- factor(metadata_be.ungerd$subjectId)
+
+# Step 2 , with all metadata that varies within participant
+metadataRandom.gerd <- select(metadata_be.gerd, c("subjectId","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")) %>%
+  column_to_rownames(., var = "subjectId")
+
+metadataRandom.ungerd <- select(metadata_be.ungerd, c("subjectId","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum", "gerdall")) %>%
+  column_to_rownames(., var = "subjectId")
+
+# Step 3, we need a separate data frame that only contains fixed effect
+metadataFixed.gerd <-
+  select(metadata_be.gerd, c("subjectId", "status")) %>% remove_rownames(.) %>% distinct(.) %>%
+  column_to_rownames(.,"subjectId")
+
+metadataFixed.ungerd <-
+  select(metadata_be.ungerd, c("subjectId", "status")) %>% remove_rownames(.) %>% distinct(.) %>%
+  column_to_rownames(.,"subjectId")
+
+# Step 4, permanova
+PERMANOVA_repeat_measures(
+  featuresBrayCurtisMatrix_be.gerd,
+  permute_within = metadataRandom.gerd,
+  blocks = participants.gerd,
+  block_data = metadataFixed.gerd,
+  permutations = 999,
+  metadata_order = c( "status","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum")
+)
+
+PERMANOVA_repeat_measures(
+  featuresBrayCurtisMatrix_be.ungerd,
+  permute_within = metadataRandom.ungerd,
+  blocks = participants.ungerd,
+  block_data = metadataFixed.ungerd,
+  permutations = 999,
+  metadata_order = c( "status","age_cheek", "be_dnatype","yendo", "regaspd", "anyaat", "bmicum", "smoke", "pckyr", "ahei2010_noETOHcum", "alcocum")
+)
+```
+#save.image
+```{r pressure, echo=FALSE}
+save.image("C:/Users/yu.w/Box/YuWang/Progress/16soral/R workspace/workshop_16S_20211015.RData")
+```
